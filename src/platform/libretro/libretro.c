@@ -62,8 +62,7 @@ static retro_input_poll_t inputPollCallback;
 static retro_input_state_t inputCallback;
 static retro_log_printf_t logCallback;
 static retro_set_rumble_state_t rumbleCallback;
-static retro_sensor_get_input_t sensorGetCallback;
-static retro_set_sensor_state_t sensorStateCallback;
+
 
 static bool libretro_supports_bitmasks = false;
 static bool libretro_supports_ff_override = false;
@@ -74,16 +73,6 @@ static void GBARetroLog(struct mLogger* logger, int category, enum mLogLevel lev
 
 static void _postAudioBuffer(struct mAVStream*, blip_t* left, blip_t* right);
 static void _setRumble(struct mRumble* rumble, int enable);
-static uint8_t _readLux(struct GBALuminanceSource* lux);
-static void _updateLux(struct GBALuminanceSource* lux);
-static void _updateCamera(const uint32_t* buffer, unsigned width, unsigned height, size_t pitch);
-static void _startImage(struct mImageSource*, unsigned w, unsigned h, int colorFormats);
-static void _stopImage(struct mImageSource*);
-static void _requestImage(struct mImageSource*, const void** buffer, size_t* stride, enum mColorFormat* colorFormat);
-static void _updateRotation(struct mRotationSource* source);
-static int32_t _readTiltX(struct mRotationSource* source);
-static int32_t _readTiltY(struct mRotationSource* source);
-static int32_t _readGyroZ(struct mRotationSource* source);
 
 static struct mCore* core;
 static color_t* outputBuffer = NULL;
@@ -94,28 +83,13 @@ static void* data;
 static size_t dataSize;
 static void* savedata;
 static struct mAVStream stream;
-static bool sensorsInitDone;
 static bool rumbleInitDone;
 static int rumbleUp;
 static int rumbleDown;
 static struct mRumble rumble;
-static struct GBALuminanceSource lux;
-static struct mRotationSource rotation;
-static bool tiltEnabled;
-static bool gyroEnabled;
-static int luxLevelIndex;
-static uint8_t luxLevel;
-static bool luxSensorEnabled;
-static bool luxSensorUsed;
+
 static struct mLogger logger;
-static struct retro_camera_callback cam;
-static struct mImageSource imageSource;
-static uint32_t* camData = NULL;
-static unsigned camWidth;
-static unsigned camHeight;
-static unsigned imcapWidth;
-static unsigned imcapHeight;
-static size_t camStride;
+
 static bool envVarsUpdated;
 static unsigned frameskipType;
 static unsigned frameskipThreshold;
@@ -128,9 +102,7 @@ static bool updateAudioLatency;
 static bool deferredSetup = false;
 static bool useBitmasks = true;
 static bool envVarsUpdated;
-static int32_t tiltX = 0;
-static int32_t tiltY = 0;
-static int32_t gyroZ = 0;
+
 static bool audioLowPassEnabled = false;
 static int32_t audioLowPassRange = 0;
 static int32_t audioLowPassLeftPrev = 0;
@@ -1124,33 +1096,7 @@ static void _deinitPostProcessing(void) {
 
 #endif
 
-static void _initSensors(void) {
-	if (sensorsInitDone) {
-		return;
-	}
 
-	struct retro_sensor_interface sensorInterface;
-	if (environCallback(RETRO_ENVIRONMENT_GET_SENSOR_INTERFACE, &sensorInterface)) {
-		sensorGetCallback = sensorInterface.get_sensor_input;
-		sensorStateCallback = sensorInterface.set_sensor_state;
-
-		if (sensorStateCallback && sensorGetCallback) {
-			if (sensorStateCallback(0, RETRO_SENSOR_ACCELEROMETER_ENABLE, EVENT_RATE)) {
-				tiltEnabled = true;
-			}
-
-			if (sensorStateCallback(0, RETRO_SENSOR_GYROSCOPE_ENABLE, EVENT_RATE)) {
-				gyroEnabled = true;
-			}
-
-			if (sensorStateCallback(0, RETRO_SENSOR_ILLUMINANCE_ENABLE, EVENT_RATE)) {
-				luxSensorEnabled = true;
-			}
-		}
-	}
-
-	sensorsInitDone = true;
-}
 
 static void _initRumble(void) {
 	if (rumbleInitDone) {
@@ -1434,25 +1380,13 @@ void retro_init(void) {
 	rumble.setRumble = _setRumble;
 	rumbleCallback = 0;
 
-	sensorsInitDone = false;
-	sensorGetCallback = 0;
-	sensorStateCallback = 0;
 
-	tiltEnabled = false;
-	gyroEnabled = false;
-	rotation.sample = _updateRotation;
-	rotation.readTiltX = _readTiltX;
-	rotation.readTiltY = _readTiltY;
-	rotation.readGyroZ = _readGyroZ;
+
+
+
 
 	envVarsUpdated = true;
-	luxSensorUsed = false;
-	luxSensorEnabled = false;
-	luxLevelIndex = 0;
-	luxLevel = 0;
-	lux.readLuminance = _readLux;
-	lux.sample = _updateLux;
-	_updateLux(&lux);
+
 
 	struct retro_log_callback log;
 	if (environCallback(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log)) {
@@ -1468,9 +1402,7 @@ void retro_init(void) {
 	stream.postAudioBuffer = _postAudioBuffer;
 	stream.postVideoFrame = 0;
 
-	imageSource.startRequestImage = _startImage;
-	imageSource.stopRequestImage = _stopImage;
-	imageSource.requestImage = _requestImage;
+
 
 	if (environCallback(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS, NULL))
 		libretro_supports_bitmasks = true;
@@ -1511,18 +1443,10 @@ void retro_deinit(void) {
 	audioSampleBufferSize = 0;
 	audioSamplesPerFrameAvg = 0.0f;
 
-	if (sensorStateCallback) {
-		sensorStateCallback(0, RETRO_SENSOR_ACCELEROMETER_DISABLE, EVENT_RATE);
-		sensorStateCallback(0, RETRO_SENSOR_GYROSCOPE_DISABLE, EVENT_RATE);
-		sensorStateCallback(0, RETRO_SENSOR_ILLUMINANCE_DISABLE, EVENT_RATE);
-		sensorGetCallback = NULL;
-		sensorStateCallback = NULL;
-	}
 
-	tiltEnabled = false;
-	gyroEnabled = false;
-	luxSensorEnabled = false;
-	sensorsInitDone = false;
+
+
+
 	useBitmasks = false;
 
 	audioLowPassEnabled = false;
@@ -1627,27 +1551,7 @@ void retro_run(void) {
 
 	core->setKeys(core, keys);
 
-	if (!luxSensorUsed) {
-		static bool wasAdjustingLux = false;
-		if (wasAdjustingLux) {
-			wasAdjustingLux = inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3) ||
-			                  inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3);
-		} else {
-			if (inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3)) {
-				++luxLevelIndex;
-				if (luxLevelIndex > 10) {
-					luxLevelIndex = 10;
-				}
-				wasAdjustingLux = true;
-			} else if (inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3)) {
-				--luxLevelIndex;
-				if (luxLevelIndex < 0) {
-					luxLevelIndex = 0;
-				}
-				wasAdjustingLux = true;
-			}
-		}
-	}
+
 
 	/* Check whether current frame should
 	 * be skipped */
@@ -2111,7 +2015,7 @@ bool retro_load_game(const struct retro_game_info* game) {
 	blip_set_rates(core->getAudioChannel(core, 1), core->frequency(core), SAMPLE_RATE);
 
 	core->setPeripheral(core, mPERIPH_RUMBLE, &rumble);
-	core->setPeripheral(core, mPERIPH_ROTATION, &rotation);
+
 
 	savedata = anonymousMemoryMap(SIZE_CART_FLASH1M);
 	memset(savedata, 0xFF, SIZE_CART_FLASH1M);
@@ -2127,22 +2031,13 @@ bool retro_load_game(const struct retro_game_info* game) {
 
 #ifdef M_CORE_GBA
 	if (core->platform(core) == mPLATFORM_GBA) {
-		core->setPeripheral(core, mPERIPH_GBA_LUMINANCE, &lux);
+		//core->setPeripheral(core, mPERIPH_GBA_LUMINANCE, &lux);
 		biosName = "gba_bios.bin";
 	}
 #endif
 
 #ifdef M_CORE_GB
 	if (core->platform(core) == mPLATFORM_GB) {
-		memset(&cam, 0, sizeof(cam));
-		cam.height = GBCAM_HEIGHT;
-		cam.width = GBCAM_WIDTH;
-		cam.caps = 1 << RETRO_CAMERA_BUFFER_RAW_FRAMEBUFFER;
-		cam.frame_raw_framebuffer = _updateCamera;
-		if (environCallback(RETRO_ENVIRONMENT_GET_CAMERA_INTERFACE, &cam)) {
-			core->setPeripheral(core, mPERIPH_IMAGE_SOURCE, &imageSource);
-		}
-
 		const char* modelName = mCoreConfigGetValue(&core->config, "gb.model");
 		struct GB* gb = core->board;
 
@@ -2196,6 +2091,7 @@ void retro_unload_game(void) {
 	data = 0;
 	mappedMemoryFree(savedata, SIZE_CART_FLASH1M);
 	savedata = 0;
+
 }
 
 size_t retro_serialize_size(void) {
@@ -2489,146 +2385,10 @@ static void _setRumble(struct mRumble* rumble, int enable) {
 	}
 }
 
-static void _updateLux(struct GBALuminanceSource* lux) {
-	UNUSED(lux);
-	struct retro_variable var = {
-		.key = "mgba_solar_sensor_level",
-		.value = 0
-	};
-	bool luxVarUpdated = envVarsUpdated;
 
-	if (luxVarUpdated && (!environCallback(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || !var.value)) {
-		luxVarUpdated = false;
-	}
 
-	if (luxVarUpdated) {
-		luxSensorUsed = strcmp(var.value, "sensor") == 0;
-	}
 
-	if (luxSensorUsed) {
-		_initSensors();
-		float fLux = luxSensorEnabled ? sensorGetCallback(0, RETRO_SENSOR_ILLUMINANCE) : 0.0f;
-		luxLevel = cbrtf(fLux) * 8;
-	} else {
-		if (luxVarUpdated) {
-			char* end;
-			int newLuxLevelIndex = strtol(var.value, &end, 10);
 
-			if (!*end) {
-				if (newLuxLevelIndex > 10) {
-					luxLevelIndex = 10;
-				} else if (newLuxLevelIndex < 0) {
-					luxLevelIndex = 0;
-				} else {
-					luxLevelIndex = newLuxLevelIndex;
-				}
-			}
-		}
 
-		luxLevel = 0x16;
-		if (luxLevelIndex > 0) {
-			luxLevel += GBA_LUX_LEVELS[luxLevelIndex - 1];
-		}
-	}
 
-	envVarsUpdated = false;
-}
 
-static uint8_t _readLux(struct GBALuminanceSource* lux) {
-	UNUSED(lux);
-	return 0xFF - luxLevel;
-}
-
-static void _updateCamera(const uint32_t* buffer, unsigned width, unsigned height, size_t pitch) {
-	if (!camData || width > camWidth || height > camHeight) {
-		if (camData) {
-			free(camData);
-			camData = NULL;
-		}
-		unsigned bufPitch = pitch / sizeof(*buffer);
-		unsigned bufHeight = height;
-		if (imcapWidth > bufPitch) {
-			bufPitch = imcapWidth;
-		}
-		if (imcapHeight > bufHeight) {
-			bufHeight = imcapHeight;
-		}
-		camData = malloc(sizeof(*buffer) * bufHeight * bufPitch);
-		memset(camData, 0xFF, sizeof(*buffer) * bufHeight * bufPitch);
-		camWidth = width;
-		camHeight = bufHeight;
-		camStride = bufPitch;
-	}
-	size_t i;
-	for (i = 0; i < height; ++i) {
-		memcpy(&camData[camStride * i], &buffer[pitch * i / sizeof(*buffer)], pitch);
-	}
-}
-
-static void _startImage(struct mImageSource* image, unsigned w, unsigned h, int colorFormats) {
-	UNUSED(image);
-	UNUSED(colorFormats);
-
-	if (camData) {
-		free(camData);
-	}
-	camData = NULL;
-	imcapWidth = w;
-	imcapHeight = h;
-	cam.start();
-}
-
-static void _stopImage(struct mImageSource* image) {
-	UNUSED(image);
-	cam.stop();	
-}
-
-static void _requestImage(struct mImageSource* image, const void** buffer, size_t* stride, enum mColorFormat* colorFormat) {
-	UNUSED(image);
-	if (!camData) {
-		cam.start();
-		*buffer = NULL;
-		return;
-	}
-	size_t offset = 0;
-	if (imcapWidth < camWidth) {
-		offset += (camWidth - imcapWidth) / 2;
-	}
-	if (imcapHeight < camHeight) {
-		offset += (camHeight - imcapHeight) / 2 * camStride;
-	}
-
-	*buffer = &camData[offset];
-	*stride = camStride;
-	*colorFormat = mCOLOR_XRGB8;
-}
-
-static void _updateRotation(struct mRotationSource* source) {
-	UNUSED(source);
-	tiltX = 0;
-	tiltY = 0;
-	gyroZ = 0;
-	_initSensors();
-	if (tiltEnabled) {
-		tiltX = sensorGetCallback(0, RETRO_SENSOR_ACCELEROMETER_X) * -2e8f;
-		tiltY = sensorGetCallback(0, RETRO_SENSOR_ACCELEROMETER_Y) * 2e8f;
-	}
-	if (gyroEnabled) {
-		gyroZ = sensorGetCallback(0, RETRO_SENSOR_GYROSCOPE_Z) * -1.1e9f;
-	}
-}
-
-static int32_t _readTiltX(struct mRotationSource* source) {
-	UNUSED(source);
-	return tiltX;
-}
-
-static int32_t _readTiltY(struct mRotationSource* source) {
-	UNUSED(source);
-	return tiltY;
-}
-
-static int32_t _readGyroZ(struct mRotationSource* source) {
-	UNUSED(source);
-	return gyroZ;
-}
