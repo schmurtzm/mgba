@@ -66,6 +66,9 @@ static retro_sensor_get_input_t sensorGetCallback;
 static retro_set_sensor_state_t sensorStateCallback;
 
 static bool libretro_supports_bitmasks = false;
+static bool libretro_supports_ff_override = false;
+static bool libretro_ff_enabled;
+static bool libretro_ff_enabled_prev;
 
 static void GBARetroLog(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args);
 
@@ -511,6 +514,36 @@ static void _initColorCorrection(void) {
 		ccLUT[color] = rFinal << 11 | gFinal << 6 | bFinal;
 	}
 }
+
+
+
+
+/* Fast forward override */
+static void set_fastforward_override(bool fastforward)
+{
+   struct retro_fastforwarding_override ff_override;
+
+   if (!libretro_supports_ff_override)
+      return;
+
+   ff_override.ratio        = -1.0f;
+   ff_override.notification = true;
+
+   if (fastforward)
+   {
+      ff_override.fastforward    = true;
+      ff_override.inhibit_toggle = true;
+   }
+   else
+   {
+      ff_override.fastforward    = false;
+      ff_override.inhibit_toggle = false;
+   }
+
+   environCallback(RETRO_ENVIRONMENT_SET_FASTFORWARDING_OVERRIDE, &ff_override);
+}
+
+
 
 static void _loadColorCorrectionSettings(void) {
 	struct retro_variable var;
@@ -1386,7 +1419,8 @@ void retro_init(void) {
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN, "Down" },
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "R" },
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, "L" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2, "Turbo R" },
+		// { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2, "Turbo R" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2, "Fast Forward" },
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2, "Turbo L" },
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3, "Brighten Solar Sensor" },
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3, "Darken Solar Sensor" },
@@ -1443,6 +1477,10 @@ void retro_init(void) {
 	if (environCallback(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS, NULL))
 		libretro_supports_bitmasks = true;
 
+	libretro_supports_ff_override = false;
+	if (environCallback(RETRO_ENVIRONMENT_SET_FASTFORWARDING_OVERRIDE, NULL))
+		libretro_supports_ff_override = true;
+		
 	frameskipType           = 0;
 	frameskipThreshold      = 0;
 	frameskipCounter        = 0;
@@ -1491,12 +1529,20 @@ void retro_deinit(void) {
 	audioLowPassRange = 0;
 	audioLowPassLeftPrev = 0;
 	audioLowPassRightPrev = 0;
+	
+	
+	if (libretro_ff_enabled)
+		set_fastforward_override(false);
+	libretro_supports_ff_override = false;
+	libretro_ff_enabled           = false;
+	libretro_ff_enabled_prev      = false;
 }
+	
 
 static int turboclock = 0;
 static bool indownstate = true;
 
-int16_t cycleturbo(bool a, bool b, bool l, bool r) {
+int16_t cycleturbo(bool a, bool b, bool l) { //, bool r
 	int16_t buttons = 0;
 	turboclock++;
 	if (turboclock >= 2) {
@@ -1516,10 +1562,10 @@ int16_t cycleturbo(bool a, bool b, bool l, bool r) {
 		buttons |= indownstate << 9;
 	}
 
-	if (r) {
+/*	if (r) {
 		buttons |= indownstate << 8;
 	}
-
+*/
 	return buttons;
 }
 
@@ -1565,7 +1611,7 @@ void retro_run(void) {
 		}
 		// XXX: turbo keys, should be moved to frontend
 #define JOYPAD_BIT(BUTTON) (1 << RETRO_DEVICE_ID_JOYPAD_ ## BUTTON)
-		keys |= cycleturbo(joypadMask & JOYPAD_BIT(X), joypadMask & JOYPAD_BIT(Y), joypadMask & JOYPAD_BIT(L2), joypadMask & JOYPAD_BIT(R2));
+		keys |= cycleturbo(joypadMask & JOYPAD_BIT(X), joypadMask & JOYPAD_BIT(Y), joypadMask & JOYPAD_BIT(L2));  //, joypadMask & JOYPAD_BIT(R2)
 #undef JOYPAD_BIT
 	} else {
 		for (i = 0; i < sizeof(keymap) / sizeof(*keymap); ++i) {
@@ -1575,8 +1621,8 @@ void retro_run(void) {
 		keys |= cycleturbo(
 			inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X),
 			inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y),
-			inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2),
-			inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)
+			inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2)
+			// inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)
 		);
 	}
 
@@ -1603,6 +1649,9 @@ void retro_run(void) {
 			}
 		}
 	}
+
+
+
 
 	/* Check whether current frame should
 	 * be skipped */
@@ -1649,7 +1698,13 @@ void retro_run(void) {
 			frameskipCounter = 0;
 		}
 	}
-
+	
+	
+	      libretro_ff_enabled = libretro_supports_ff_override &&
+            inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2);
+            
+            
+            
    /* If frameskip settings have changed, update
     * frontend audio latency */
    if (updateAudioLatency)
@@ -1738,8 +1793,20 @@ void retro_run(void) {
 		rumbleUp = 0;
 		rumbleDown = 0;
 	}
+	/* Handle fast forward button */
+	if (libretro_ff_enabled != libretro_ff_enabled_prev)
+	{
+	set_fastforward_override(libretro_ff_enabled);
+	libretro_ff_enabled_prev = libretro_ff_enabled;
+	}
 }
 
+
+
+
+   
+   
+   
 static void _setupMaps(struct mCore* core) {
 #ifdef M_CORE_GBA
 	if (core->platform(core) == mPLATFORM_GBA) {
